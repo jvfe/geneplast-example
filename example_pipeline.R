@@ -18,11 +18,14 @@ get_string_ids <- function(ids, species = "9606") {
   )
 }
 
+# genes_de_interesse <- vroom("tabela_genes.csv")
+#
+# genes <- genes_de_interesse$GENES
+
 gene <- c("FGFR3", "ALDH1L1", "S100B")
 
 string_id <- get_string_ids(gene) %>%
   janitor::clean_names() %>%
-  dplyr::select(-c(query_index)) %>%
   tidyr::separate(string_id, into = c("ssp_id", "string_id"), sep="\\.")
 
 ## Get geneplast databases
@@ -43,7 +46,7 @@ cogs_of_interest <- cogdata %>%
 
 gc()
 
-ogr <- groot.preprocess(cogdata=cogdata, phyloTree=phyloTree,cogids = cogs_of_interest$cog, spid="9606")
+ogr <- groot.preprocess(cogdata=cogdata, phyloTree=phyloTree, cogids = cogs_of_interest$cog, spid="9606")
 
 ogr <- groot(ogr, nPermutations=1000, verbose=FALSE)
 
@@ -61,3 +64,7 @@ groot_df <- res %>%
   left_join(cogs_of_interest)
 
 View(groot_df)
+
+groot.plot(ogr, whichOG="NOG26751")
+
+
