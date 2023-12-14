@@ -20,7 +20,7 @@ get_string_ids <- function(ids, species = "9606") {
 
 # genes_de_interesse <- vroom("tabela_genes.csv")
 #
-# genes <- genes_de_interesse$GENES
+# gene <- genes_de_interesse$GENES
 
 gene <- c("FGFR3", "ALDH1L1", "S100B")
 
