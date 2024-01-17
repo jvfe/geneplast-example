@@ -2,9 +2,15 @@ library(geneplast)
 library(AnnotationHub)
 library(vroom)
 library(dplyr)
+library(igraph)
+library(ggraph)
+library(purrr)
+library(tidyr)
+library(here)
 
 set.seed(1024)
 
+# Get identifiers from STRINGdb
 get_string_ids <- function(ids, species = "9606") {
   ids_collapsed <- paste0(ids, collapse = "%0d")
 
@@ -18,6 +24,64 @@ get_string_ids <- function(ids, species = "9606") {
   )
 }
 
+# Get interaction network from STRINGdb
+get_string_network <-
+  function(ids,
+           species = "9606",
+           required_score = 0) {
+    ids_collapsed <- paste0(ids, collapse = "%0d")
+
+    jsonlite::fromJSON(
+      RCurl::postForm(
+        "https://string-db.org/api/json/network",
+        identifiers = ids_collapsed,
+        echo_query  = "1",
+        required_score = as.character(required_score),
+        species = species
+      ),
+    )
+  }
+
+
+# Function to combine scores according to the STRINGdb algorithm
+combinescores <- function(dat,
+                          evidences = "all",
+                          confLevel = 0.4) {
+  if (evidences[1] == "all") {
+    edat <- dat[,-c(1, 2, ncol(dat))]
+  } else {
+    if (!all(evidences %in% colnames(dat))) {
+      stop("NOTE: one or more 'evidences' not listed in 'dat' colnames!")
+    }
+    edat <- dat[, evidences]
+  }
+  if (any(edat > 1)) {
+    edat <- edat / 1000
+  }
+  edat <- 1 - edat
+  sc <- apply(
+    X = edat,
+    MARGIN = 1,
+    FUN = function(x)
+      1 - prod(x)
+  )
+  dat <- cbind(dat[, c(1, 2)], combined_score = sc)
+  idx <- dat$combined_score >= confLevel
+  dat <- dat[idx,]
+  return(dat)
+}
+
+subset_graph_by_root <-
+  function(geneplast_result, root_number, graph) {
+    filtered <- geneplast_result %>%
+      filter(root >= root_number) %>%
+      pull(protein_id)
+
+    induced_subgraph(graph, which(V(graph)$name %in% filtered))
+  }
+
+##### Rooting ----------
+
 # genes_de_interesse <- vroom("tabela_genes.csv")
 #
 # genes <- genes_de_interesse$GENES
@@ -26,7 +90,9 @@ gene <- c("FGFR3", "ALDH1L1", "S100B")
 
 string_id <- get_string_ids(gene) %>%
   janitor::clean_names() %>%
-  tidyr::separate(string_id, into = c("ssp_id", "string_id"), sep="\\.")
+  tidyr::separate(string_id,
+                  into = c("ssp_id", "string_id"),
+                  sep = "\\.")
 
 ## Get geneplast databases
 
@@ -46,14 +112,21 @@ cogs_of_interest <- cogdata %>%
 
 gc()
 
-ogr <- groot.preprocess(cogdata=cogdata, phyloTree=phyloTree, cogids = cogs_of_interest$cog, spid="9606")
+ogr <-
+  groot.preprocess(
+    cogdata = cogdata,
+    phyloTree = phyloTree,
+    cogids = cogs_of_interest$cog,
+    spid = "9606"
+  )
 
-ogr <- groot(ogr, nPermutations=1000, verbose=FALSE)
+ogr <- groot(ogr, nPermutations = 1000, verbose = FALSE)
 
-res <- groot.get(ogr, what="results")
+res <- groot.get(ogr, what = "results")
 
 ## Naming the rooted clades and getting the final results table
-CLADE_NAMES <- "https://raw.githubusercontent.com/dalmolingroup/neurotransmissionevolution/ctenophora_before_porifera/analysis/geneplast_clade_names.tsv"
+CLADE_NAMES <-
+  "https://raw.githubusercontent.com/dalmolingroup/neurotransmissionevolution/ctenophora_before_porifera/analysis/geneplast_clade_names.tsv"
 
 lca_names <- vroom(CLADE_NAMES)
 
@@ -63,8 +136,74 @@ groot_df <- res %>%
   left_join(lca_names) %>%
   left_join(cogs_of_interest)
 
-View(groot_df)
+groot.plot(ogr, whichOG = "NOG26751")
 
-groot.plot(ogr, whichOG="NOG26751")
+##### Network assembly ----------
+
+network <- get_string_network(string_id$string_id)
+
+network_separated <-  network %>%
+  separate(stringId_A,
+           into = c("ncbi_taxon_id", "stringId_A"),
+           sep = "\\.") %>%
+  separate(stringId_B,
+           into = c("ncbi_taxon_id", "stringId_B"),
+           sep = "\\.")
+
+nodelist <-
+  data.frame(node = unique(
+    c(network_separated$stringId_A, network_separated$stringId_B)
+  )) %>%
+  left_join(string_id, by = c("node" = "string_id"))
+
+network_filtered <- network |>
+    separate(stringId_A,
+             into = c("ncbi_taxon_id", "stringId_A"),
+             sep = "\\.") %>%
+    separate(stringId_B,
+             into = c("ncbi_taxon_id", "stringId_B"),
+             sep = "\\.") %>%
+    dplyr::select(stringId_A, stringId_B)
+
+# REALIZAR COM O DADO COMPLETO \/
+# Filtra a rede por canais de evidência e confiabilidade das ligações
+
+# network_filtered <- network %>%
+#   combinescores(.,
+#                 evidences = c("ascore", "escore", "dscore"),
+#                 confLevel = 0.4) %>%
+#   separate(stringId_A,
+#            into = c("ncbi_taxon_id", "stringId_A"),
+#            sep = "\\.") %>%
+#   separate(stringId_B,
+#            into = c("ncbi_taxon_id", "stringId_B"),
+#            sep = "\\.") %>%
+#   dplyr::select(stringId_A, stringId_B)
+
+graph <-
+  graph_from_data_frame(network_filtered, directed = FALSE, vertices = nodelist)
 
 
+roots <- unique(groot_df$root) %>%
+  set_names(unique(groot_df$clade_name))
+
+subsets <-
+  map(roots, ~ subset_graph_by_root(groot_df, .x, graph))
+
+# Plotando a rede mais nova
+
+ggraph(subsets[[1]], "kk") +
+  geom_edge_link(color = "#90909020") +
+  geom_node_point() +
+  coord_fixed() +
+  theme_void() +
+  theme(legend.position = "bottom")
+
+# Plotando a rede mais antiga
+
+ggraph(subsets[[length(subsets)]], "kk") +
+  geom_edge_link(color = "#90909020") +
+  geom_node_point() +
+  coord_fixed() +
+  theme_void() +
+  theme(legend.position = "bottom")
